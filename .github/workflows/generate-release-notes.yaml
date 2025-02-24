@@ -1,4 +1,4 @@
-name: Generate and Upload Release Notes
+name: Create Release and Upload Release Notes
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - main
 
 jobs:
-  generate-release-notes:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -15,8 +15,23 @@ jobs:
         run: |
           echo "Release notes content goes here" > release_notes.txt
 
-      - name: Upload release notes artifact
-        uses: actions/upload-artifact@v3
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: release-notes
-          path: release_notes.txt
+          tag_name: v1.0.0   # Adjust as needed
+          release_name: Release v1.0.0
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: release_notes.txt
+          asset_name: release_notes.txt
+          asset_content_type: text/plain
