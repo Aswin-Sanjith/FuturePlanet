@@ -248,9 +248,8 @@ jobs:
         id: create_release
         uses: actions/create-release@v1
         env:
-          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
-          token: ${{ secrets.GIT_TOKEN }}
           tag_name: v${{ steps.version.outputs.NEW_VERSION }}
           release_name: Release v${{ steps.version.outputs.NEW_VERSION }}
           body: ${{ steps.analyze.outputs.SHORT_NOTES }}
@@ -260,9 +259,8 @@ jobs:
       - name: Upload Release Notes
         uses: actions/upload-release-asset@v1
         env:
-          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
-          token: ${{ secrets.GIT_TOKEN }}
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./release_notes.md
           asset_name: release_notes.md
