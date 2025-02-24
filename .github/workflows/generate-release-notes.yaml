@@ -1,4 +1,4 @@
-name: Create Release and Upload Release Notes
+name: Generate Release Notes and Documentation
 
 on:
   push:
@@ -6,32 +6,271 @@ on:
       - main
 
 jobs:
-  release:
+  generate-release-notes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
-      - name: Generate release notes file
+      - name: Get latest tag
+        id: latest_tag
         run: |
-          echo "Release notes content goes here" > release_notes.txt
+          # Get the most recent tag or use a starting point if none exists
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "HEAD~100")
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Set new version number
+        id: version
+        run: |
+          # Generate date-based version or increment existing version
+          CURRENT_DATE=$(date +'%Y.%m.%d')
+          # For multiple releases in same day, add build number
+          CURRENT_VERSION="${CURRENT_DATE}.1"
+          echo "NEW_VERSION=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: |
+          npm install @octokit/rest
+
+      - name: Analyze PRs and changes since last release
+        id: analyze
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+        run: |
+          # Create and run the script to analyze changes
+          cat > analyze_changes.js << 'EOF'
+          const { Octokit } = require('@octokit/rest');
+          
+          async function run() {
+            try {
+              // Setup GitHub API client
+              const octokit = new Octokit({
+                auth: process.env.GIT_TOKEN
+              });
+              
+              const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+              const latestTag = process.env.LATEST_TAG;
+              
+              // Get merged PRs since last tag
+              const { data: commits } = await octokit.repos.listCommits({
+                owner,
+                repo,
+                since: new Date(new Date().getTime() - (30 * 24 * 60 * 60 * 1000)).toISOString(), // Last 30 days as fallback
+              });
+              
+              // Get PR numbers from commit messages
+              const prNumbers = new Set();
+              commits.forEach(commit => {
+                const match = commit.commit.message.match(/#(\d+)/);
+                if (match) {
+                  prNumbers.add(parseInt(match[1], 10));
+                }
+              });
+              
+              // Process PR details
+              const prs = [];
+              for (const prNum of prNumbers) {
+                try {
+                  const { data: pr } = await octokit.pulls.get({
+                    owner,
+                    repo,
+                    pull_number: prNum
+                  });
+                  
+                  if (pr.merged_at && new Date(pr.merged_at) > new Date(new Date().getTime() - (30 * 24 * 60 * 60 * 1000))) {
+                    // Get PR changes
+                    const { data: files } = await octokit.pulls.listFiles({
+                      owner,
+                      repo,
+                      pull_number: prNum
+                    });
+                    
+                    // Categorize changes
+                    const fileTypes = {
+                      frontend: 0,
+                      backend: 0,
+                      config: 0,
+                      docs: 0
+                    };
+                    
+                    files.forEach(file => {
+                      if (file.filename.match(/\.(jsx?|tsx?|css|scss|html)$/)) fileTypes.frontend++;
+                      else if (file.filename.match(/\.(cfm|cfc)$/)) fileTypes.backend++;
+                      else if (file.filename.match(/\.(json|yml|yaml|config|ini)$/)) fileTypes.config++;
+                      else if (file.filename.match(/\.(md|txt|pdf|docx)$/)) fileTypes.docs++;
+                    });
+                    
+                    // Determine primary change type
+                    let changeType = "Other";
+                    const maxChanges = Math.max(...Object.values(fileTypes));
+                    for (const [type, count] of Object.entries(fileTypes)) {
+                      if (count === maxChanges && count > 0) {
+                        changeType = type.charAt(0).toUpperCase() + type.slice(1);
+                        break;
+                      }
+                    }
+                    
+                    // Assign module based on file paths
+                    let module = "General";
+                    for (const file of files) {
+                      // Detect possible module from path
+                      const pathParts = file.filename.split('/');
+                      if (pathParts.length > 1 && pathParts[0] === 'my-react-app' && pathParts[1] === 'src' && pathParts[2]) {
+                        if (pathParts[2] === 'components' && pathParts[3]) {
+                          module = pathParts[3].split('.')[0];
+                          break;
+                        } else if (pathParts[2]) {
+                          module = pathParts[2];
+                          break;
+                        }
+                      }
+                    }
+                    
+                    prs.push({
+                      number: pr.number,
+                      title: pr.title,
+                      body: pr.body || '',
+                      author: pr.user.login,
+                      merged_at: pr.merged_at,
+                      changeType,
+                      module,
+                      url: pr.html_url,
+                      files_changed: files.length
+                    });
+                  }
+                } catch (error) {
+                  console.error(`Error processing PR #${prNum}:`, error.message);
+                }
+              }
+              
+              // Group PRs by module
+              const moduleGroups = {};
+              prs.forEach(pr => {
+                if (!moduleGroups[pr.module]) {
+                  moduleGroups[pr.module] = [];
+                }
+                moduleGroups[pr.module].push(pr);
+              });
+              
+              // Generate technical notes
+              let technicalNotes = '## Technical Details\n\n';
+              for (const [module, modulePRs] of Object.entries(moduleGroups)) {
+                technicalNotes += `### ${module}\n\n`;
+                modulePRs.forEach(pr => {
+                  technicalNotes += `- [#${pr.number}](${pr.url}) - ${pr.title} (${pr.changeType}, ${pr.files_changed} files)\n`;
+                  
+                  // Add relevant details from PR body (assuming some patterns)
+                  if (pr.body) {
+                    // Try to extract technical details
+                    const techMatch = pr.body.match(/Technical details?:([\s\S]*?)(?:##|$)/i);
+                    if (techMatch && techMatch[1].trim()) {
+                      const details = techMatch[1].trim().split('\n').map(line => `  ${line}`).join('\n');
+                      technicalNotes += `${details}\n`;
+                    }
+                  }
+                });
+                technicalNotes += '\n';
+              }
+              
+              // Generate non-technical notes
+              let businessNotes = '## Business Changes\n\n';
+              for (const [module, modulePRs] of Object.entries(moduleGroups)) {
+                businessNotes += `### ${module}\n\n`;
+                modulePRs.forEach(pr => {
+                  businessNotes += `- ${pr.title}\n`;
+                  
+                  // Try to extract business/functional details
+                  if (pr.body) {
+                    const businessMatch = pr.body.match(/business changes?:|functional changes?:|changes?:([\s\S]*?)(?:##|$)/i);
+                    if (businessMatch && businessMatch[1] && businessMatch[1].trim()) {
+                      const details = businessMatch[1].trim().split('\n').map(line => `  ${line}`).join('\n');
+                      businessNotes += `${details}\n`;
+                    }
+                  }
+                });
+                businessNotes += '\n';
+              }
+              
+              // Summary statistics
+              let summary = '## Release Summary\n\n';
+              summary += `- Total PRs: ${prs.length}\n`;
+              summary += `- Release Date: ${new Date().toISOString().split('T')[0]}\n`;
+              summary += `- Release Version: ${process.env.NEW_VERSION}\n\n`;
+              
+              const changeTypes = {};
+              prs.forEach(pr => {
+                changeTypes[pr.changeType] = (changeTypes[pr.changeType] || 0) + 1;
+              });
+              
+              summary += "### Changes by Type\n\n";
+              for (const [type, count] of Object.entries(changeTypes)) {
+                summary += `- ${type}: ${count}\n`;
+              }
+              
+              // Assemble the full notes
+              const fullNotes = `# Release Notes - ${process.env.NEW_VERSION}\n\n${summary}\n${businessNotes}\n${technicalNotes}`;
+              
+              // Write to file
+              require('fs').writeFileSync('release_notes.md', fullNotes);
+              console.log('Release notes generated successfully!');
+              
+              // Output a shortened version for the release description
+              const shortNotes = `${summary}\n\nSee the attached release_notes.md for full details.`;
+              console.log(`::set-output name=short_notes::${shortNotes.replace(/\n/g, '%0A')}`);
+              
+            } catch (error) {
+              console.error('Error generating release notes:', error);
+              process.exit(1);
+            }
+          }
+          
+          run();
+          EOF
+
+          node analyze_changes.js
+          
+          # Save short notes to output
+          SHORT_NOTES=$(grep -v '::set-output' release_notes.md | head -20 | tr '\n' '%0A')
+          echo "SHORT_NOTES=$SHORT_NOTES" >> $GITHUB_OUTPUT
+
+      - name: Create Tag and Release
         id: create_release
         uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
-          tag_name: v1.0.0   # Adjust as needed
-          release_name: Release v1.0.0
+          tag_name: v${{ steps.version.outputs.NEW_VERSION }}
+          release_name: Release v${{ steps.version.outputs.NEW_VERSION }}
+          body: ${{ steps.analyze.outputs.SHORT_NOTES }}
           draft: false
           prerelease: false
 
-      - name: Upload Release Asset
+      - name: Upload Release Notes
         uses: actions/upload-release-asset@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: release_notes.txt
-          asset_name: release_notes.txt
-          asset_content_type: text/plain
+          asset_path: ./release_notes.md
+          asset_name: release_notes.md
+          asset_content_type: text/markdown
+
+      - name: Archive documentation to repo
+        run: |
+          mkdir -p docs/releases
+          cp release_notes.md docs/releases/v${{ steps.version.outputs.NEW_VERSION }}.md
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add docs/releases/v${{ steps.version.outputs.NEW_VERSION }}.md
+          git commit -m "Add release notes for v${{ steps.version.outputs.NEW_VERSION }}" || echo "No changes to commit"
+          git push

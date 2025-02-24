@@ -1,39 +1,41 @@
 #!/bin/bash
-set -e
 
-# Check if PR_NUMBER is set
-if [ -z "$PR_NUMBER" ]; then
-  echo "PR_NUMBER is not set. Exiting."
-  exit 1
-fi
+# This script helps create better PR descriptions with structured documentation
+# Usage: .github/scripts/generate_release_notes.sh [PR_TITLE]
 
-# Get owner and repo from GITHUB_REPOSITORY (format: owner/repo)
-IFS='/' read -r owner repo <<< "$GITHUB_REPOSITORY"
+PR_TITLE="${1:-"Feature/Fix: Brief description"}"
 
-# Fetch PR details using GitHub API
-pr_json=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$owner/$repo/pulls/$PR_NUMBER")
-branch_name=$(echo "$pr_json" | jq -r '.head.ref')
-pr_title=$(echo "$pr_json" | jq -r '.title')
-pr_body=$(echo "$pr_json" | jq -r '.body')
+cat << EOF > pr_template.md
+# ${PR_TITLE}
 
-# Helper: extract a section from the PR body
-function extract_section() {
-  local header="$1"
-  # Use awk to capture text following the header until the next header or end of file.
-  awk "/$header/{flag=1; next} /^###/{flag=0} flag" <<< "$pr_body" | sed 's/^[ \t]*//'
-}
+## Changes
+<!-- Describe the functional/business changes in non-technical terms -->
 
-technical_changes=$(extract_section "### Technical Changes")
-non_technical_changes=$(extract_section "### Non-Technical Changes")
+## Technical Details
+<!-- Provide technical implementation details for developers -->
 
-# Fetch changed files for the PR
-files_json=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$owner/$repo/pulls/$PR_NUMBER/files")
-file_list=$(echo "$files_json" | jq -r '.[].filename' | sed 's/^/- /')
+## Testing
+<!-- How was this change tested? -->
 
-# Format the release notes entry in Markdown
-entry="\n## PR #${PR_NUMBER} [${branch_name}]\n\n**Title:** ${pr_title}\n\n**Changed Files:**\n${file_list}\n\n**Technical Changes:**\n${technical_changes}\n\n**Non-Technical Changes:**\n${non_technical_changes}\n\n*Merged on $(date)*\n---\n"
+## Screenshots/Examples
+<!-- If applicable, add screenshots or examples -->
 
-# Append the entry to RELEASE_NOTES.md (create the file if it doesn't exist)
-echo -e "$entry" >> RELEASE_NOTES.md
+## Modules Affected
+<!-- List the modules/features affected by this change -->
+- [ ] LMS
+- [ ] Forms
+- [ ] Folder
+- [ ] Other: ________________
 
-echo "Release notes updated successfully."
+## Type of Change
+<!-- Mark the type of change -->
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Enhancement of existing feature
+- [ ] Breaking change
+- [ ] Documentation update
+
+EOF
+
+echo "PR template generated as pr_template.md"
+echo "Use this to create well-documented PRs that will feed into automated release notes"
