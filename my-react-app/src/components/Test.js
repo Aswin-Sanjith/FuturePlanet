@@ -11,6 +11,10 @@ const Test = () => {
       <button onClick={() => {
         console.log('Button clicked');
       }}>Click me</button>
+      <p>I want to test the release notes and the workflow, part 2, and the PR number</p>
+      <button onClick={() => {
+        console.log('Button clicked');
+      }}>Click me</button>
     </div>
   );
 };
