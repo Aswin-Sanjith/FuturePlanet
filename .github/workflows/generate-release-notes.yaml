@@ -40,7 +40,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install @octokit/rest
+          # Install a specific version of octokit that supports CommonJS
+          npm install @octokit/rest@18.12.0
 
       - name: Analyze PRs and changes since last release
         id: analyze
