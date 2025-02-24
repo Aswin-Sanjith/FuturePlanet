@@ -250,6 +250,7 @@ jobs:
         env:
           GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
+          token: ${{ secrets.GIT_TOKEN }}
           tag_name: v${{ steps.version.outputs.NEW_VERSION }}
           release_name: Release v${{ steps.version.outputs.NEW_VERSION }}
           body: ${{ steps.analyze.outputs.SHORT_NOTES }}
@@ -261,6 +262,7 @@ jobs:
         env:
           GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
+          token: ${{ secrets.GIT_TOKEN }}
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./release_notes.md
           asset_name: release_notes.md
