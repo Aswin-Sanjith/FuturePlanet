@@ -7,7 +7,7 @@ import PropTypes from 'prop-types';
 const Test = () => {
   return (
     <div className="container mt-5">
-      <h1>This is a test file </h1>
+      <h1>This PR was made to test the release notes </h1>
     </div>
   );
 };
