@@ -14,7 +14,7 @@ jobs:
 
       - name: Generate Release Notes using Bash Script
         env:
-          GIT_AUTH_TOKEN: ${{ secrets.GIT_AUTH_TOKEN }}
+          GIT_TOKEN: ${{ secrets.GIT_AUTH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: bash .github/scripts/generate_release_notes.sh
@@ -25,4 +25,4 @@ jobs:
           git config user.email "github-actions@github.com"
           git add RELEASE_NOTES.md
           git commit -m "Update release notes for PR #${{ github.event.pull_request.number }}" || echo "No changes to commit"
-          git push https://x-access-token:${GIT_AUTH_TOKEN}@github.com/Aswin-Sanjith/FuturePlanet.git HEAD:main
+          git push https://x-access-token:${{ secrets.GIT_AUTH_TOKEN }}@github.com/Aswin-Sanjith/FuturePlanet.git HEAD:main
