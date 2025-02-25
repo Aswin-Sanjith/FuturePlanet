@@ -8,16 +8,19 @@ import { useState } from 'react';
 
 
 const Test = () => {
-  const createID = () => {
+  const generateID = () => {
     return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
   }
-  const [id, setID] = useState(createID());
+  const [id, setID] = useState(generateID());
+  const [name, setName] = useState('');
   return (
     <>
-      <button onClick={() => setID(createID())}>Create ID</button>
+      <input type="text" placeholder="Enter your name" />
+      <button onClick={() => {setName(e.target.value); setID(generateID())}}>Submit</button>
+      <p>Name: {name}</p>
       <p>ID: {id}</p>
     </>
-  );
+);
 };
 
 Test.propTypes = {};
