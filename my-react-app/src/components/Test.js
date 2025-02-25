@@ -21,11 +21,11 @@ const Test = () => {
     }
     return true;
   }
-  const isEven = (num) => {
-    return num % 2 === 0;
-  } 
-  const isOdd = (num) => {
-    return num % 2 !== 0;
+  const isNegative = (num) => {
+    return num < 0;
+  }
+  const isPositive = (num) => {
+    return num > 0;
   }
 
   return (
@@ -35,8 +35,8 @@ const Test = () => {
       <button onClick={() => setCount(count - 1)}>Decrement</button>
       <p>Factorial: {factorial(count)}</p>
       <p>Is Prime: {isPrime(count)}</p>
-      <p>Is Even: {isEven(count)}</p>
-      <p>Is Odd: {isOdd(count)}</p>
+      <p>Is Negative: {isNegative(count)}</p>
+      <p>Is Positive: {isPositive(count)}</p>
     </>
   );
 };
