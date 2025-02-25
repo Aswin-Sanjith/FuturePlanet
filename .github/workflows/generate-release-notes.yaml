@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      days_back:
+        description: 'Number of days to look back for changes'
+        required: false
+        default: '30'
 
 jobs:
   generate-release-notes:
@@ -37,6 +43,7 @@ jobs:
           # For multiple releases in same day, add build number
           CURRENT_VERSION="${CURRENT_DATE}.1"
           echo "NEW_VERSION=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "New version will be: $CURRENT_VERSION"
 
       - name: Install dependencies
         run: |
@@ -47,10 +54,15 @@ jobs:
         id: analyze
         env:
           GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          LATEST_TAG: ${{ steps.latest_tag.outputs.LATEST_TAG }}
+          NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
+          DAYS_BACK: ${{ github.event.inputs.days_back || '30' }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           # Create and run the script to analyze changes
           cat > analyze_changes.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
+          const fs = require('fs');
           
           async function run() {
             try {
@@ -61,13 +73,20 @@ jobs:
               
               const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
               const latestTag = process.env.LATEST_TAG;
+              const newVersion = process.env.NEW_VERSION;
+              const daysBack = parseInt(process.env.DAYS_BACK, 10) || 30;
+              
+              console.log(`Analyzing changes for ${owner}/${repo} since ${latestTag}`);
+              console.log(`New version will be: ${newVersion}`);
               
               // Get merged PRs since last tag
               const { data: commits } = await octokit.repos.listCommits({
                 owner,
                 repo,
-                since: new Date(new Date().getTime() - (30 * 24 * 60 * 60 * 1000)).toISOString(), // Last 30 days as fallback
+                since: new Date(new Date().getTime() - (daysBack * 24 * 60 * 60 * 1000)).toISOString(),
               });
+              
+              console.log(`Found ${commits.length} commits in the last ${daysBack} days`);
               
               // Get PR numbers from commit messages
               const prNumbers = new Set();
@@ -77,6 +96,8 @@ jobs:
                   prNumbers.add(parseInt(match[1], 10));
                 }
               });
+              
+              console.log(`Found ${prNumbers.size} potential PR references`);
               
               // Process PR details
               const prs = [];
@@ -88,7 +109,9 @@ jobs:
                     pull_number: prNum
                   });
                   
-                  if (pr.merged_at && new Date(pr.merged_at) > new Date(new Date().getTime() - (30 * 24 * 60 * 60 * 1000))) {
+                  if (pr.merged_at && new Date(pr.merged_at) > new Date(new Date().getTime() - (daysBack * 24 * 60 * 60 * 1000))) {
+                    console.log(`Processing PR #${prNum}: ${pr.title}`);
+                    
                     // Get PR changes
                     const { data: files } = await octokit.pulls.listFiles({
                       owner,
@@ -101,14 +124,19 @@ jobs:
                       frontend: 0,
                       backend: 0,
                       config: 0,
-                      docs: 0
+                      docs: 0,
+                      infrastructure: 0,
+                      test: 0
                     };
                     
                     files.forEach(file => {
-                      if (file.filename.match(/\.(jsx?|tsx?|css|scss|html)$/)) fileTypes.frontend++;
-                      else if (file.filename.match(/\.(cfm|cfc)$/)) fileTypes.backend++;
-                      else if (file.filename.match(/\.(json|yml|yaml|config|ini)$/)) fileTypes.config++;
-                      else if (file.filename.match(/\.(md|txt|pdf|docx)$/)) fileTypes.docs++;
+                      const path = file.filename.toLowerCase();
+                      if (path.match(/\.(jsx?|tsx?|css|scss|html)$/)) fileTypes.frontend++;
+                      else if (path.match(/\.(cfm|cfc|php|py|java|go|rb)$/)) fileTypes.backend++;
+                      else if (path.match(/\.(json|yml|yaml|config|ini|env|toml)$/)) fileTypes.config++;
+                      else if (path.match(/\.(md|txt|pdf|docx)$/)) fileTypes.docs++;
+                      else if (path.match(/\.(test|spec)\.(jsx?|tsx?)$/)) fileTypes.test++;
+                      else if (path.match(/^(docker|k8s|terraform|ansible|\.github\/workflows)/)) fileTypes.infrastructure++;
                     });
                     
                     // Determine primary change type
@@ -121,38 +149,101 @@ jobs:
                       }
                     }
                     
-                    // Assign module based on file paths
+                    // Extract labels from PR to help categorize
+                    const labels = pr.labels.map(label => label.name);
+                    
+                    // Determine module from PR title, labels, or file paths
                     let module = "General";
-                    for (const file of files) {
-                      // Detect possible module from path
-                      const pathParts = file.filename.split('/');
-                      if (pathParts.length > 1 && pathParts[0] === 'my-react-app' && pathParts[1] === 'src' && pathParts[2]) {
-                        if (pathParts[2] === 'components' && pathParts[3]) {
-                          module = pathParts[3].split('.')[0];
-                          break;
-                        } else if (pathParts[2]) {
-                          module = pathParts[2];
-                          break;
+                    
+                    // First try to get module from labels
+                    const moduleLabel = labels.find(label => label.startsWith('module:'));
+                    if (moduleLabel) {
+                      module = moduleLabel.replace('module:', '').trim();
+                    } 
+                    // Then try to get from PR title
+                    else if (pr.title.includes(':')) {
+                      const titleParts = pr.title.split(':');
+                      if (titleParts[0].length < 20) { // Reasonable module name length
+                        module = titleParts[0].trim();
+                      }
+                    }
+                    // Finally try to determine from files
+                    else {
+                      for (const file of files) {
+                        const pathParts = file.filename.split('/');
+                        // Check for components or modules directories
+                        if (pathParts.length > 2) {
+                          if (pathParts.includes('components') && pathParts.indexOf('components') + 1 < pathParts.length) {
+                            const componentIdx = pathParts.indexOf('components');
+                            module = pathParts[componentIdx + 1].replace(/([A-Z])/g, ' $1').trim();
+                            break;
+                          } else if (pathParts.includes('modules') && pathParts.indexOf('modules') + 1 < pathParts.length) {
+                            const moduleIdx = pathParts.indexOf('modules');
+                            module = pathParts[moduleIdx + 1].replace(/([A-Z])/g, ' $1').trim();
+                            break;
+                          } else if (pathParts.includes('features') && pathParts.indexOf('features') + 1 < pathParts.length) {
+                            const featureIdx = pathParts.indexOf('features');
+                            module = pathParts[featureIdx + 1].replace(/([A-Z])/g, ' $1').trim();
+                            break;
+                          }
                         }
                       }
+                    }
+                    
+                    // Make module name look nice (capitalize words)
+                    module = module.replace(/\b\w/g, l => l.toUpperCase());
+                    
+                    // Extract business and technical details from PR body
+                    let businessDetails = '';
+                    let technicalDetails = '';
+                    
+                    if (pr.body) {
+                      // Look for business/functional details
+                      const businessMatch = pr.body.match(/business changes?:|functional changes?:|changes?:|user impact:|what changed?:([\s\S]*?)(?:##|technical|$)/i);
+                      if (businessMatch && businessMatch[1] && businessMatch[1].trim()) {
+                        businessDetails = businessMatch[1].trim();
+                      }
+                      
+                      // Look for technical details
+                      const techMatch = pr.body.match(/technical details?:|implementation details?:|how it works:([\s\S]*?)(?:##|$)/i);
+                      if (techMatch && techMatch[1] && techMatch[1].trim()) {
+                        technicalDetails = techMatch[1].trim();
+                      }
+                    }
+                    
+                    // If no explicit sections found, try to extract from title and first paragraph
+                    if (!businessDetails && pr.body) {
+                      const firstParagraph = pr.body.split('\n\n')[0].trim();
+                      if (firstParagraph && firstParagraph.length < 500) {
+                        businessDetails = firstParagraph;
+                      }
+                    }
+                    
+                    // Fallback to title if no business details found
+                    if (!businessDetails) {
+                      businessDetails = pr.title;
                     }
                     
                     prs.push({
                       number: pr.number,
                       title: pr.title,
-                      body: pr.body || '',
                       author: pr.user.login,
                       merged_at: pr.merged_at,
                       changeType,
                       module,
                       url: pr.html_url,
-                      files_changed: files.length
+                      files_changed: files.length,
+                      labels,
+                      businessDetails,
+                      technicalDetails
                     });
                   }
                 } catch (error) {
                   console.error(`Error processing PR #${prNum}:`, error.message);
                 }
               }
+              
+              console.log(`Successfully processed ${prs.length} merged PRs`);
               
               // Group PRs by module
               const moduleGroups = {};
@@ -163,71 +254,113 @@ jobs:
                 moduleGroups[pr.module].push(pr);
               });
               
-              // Generate technical notes
-              let technicalNotes = '## Technical Details\n\n';
-              for (const [module, modulePRs] of Object.entries(moduleGroups)) {
-                technicalNotes += `### ${module}\n\n`;
-                modulePRs.forEach(pr => {
-                  technicalNotes += `- [#${pr.number}](${pr.url}) - ${pr.title} (${pr.changeType}, ${pr.files_changed} files)\n`;
-                  
-                  // Add relevant details from PR body (assuming some patterns)
-                  if (pr.body) {
-                    // Try to extract technical details
-                    const techMatch = pr.body.match(/Technical details?:([\s\S]*?)(?:##|$)/i);
-                    if (techMatch && techMatch[1].trim()) {
-                      const details = techMatch[1].trim().split('\n').map(line => `  ${line}`).join('\n');
-                      technicalNotes += `${details}\n`;
+              // Generate business notes - organized by module
+              let businessNotes = '## Business Changes\n\n';
+              
+              if (Object.keys(moduleGroups).length === 0) {
+                businessNotes += '_No significant business changes in this release._\n\n';
+              } else {
+                for (const [module, modulePRs] of Object.entries(moduleGroups)) {
+                  businessNotes += `### ${module}\n\n`;
+                  modulePRs.forEach(pr => {
+                    businessNotes += `#### ${pr.title} ([#${pr.number}](${pr.url}))\n\n`;
+                    
+                    if (pr.businessDetails) {
+                      businessNotes += `${pr.businessDetails}\n\n`;
+                    } else {
+                      businessNotes += `_No detailed business impact provided._\n\n`;
                     }
-                  }
-                });
-                technicalNotes += '\n';
+                  });
+                }
               }
               
-              // Generate non-technical notes
-              let businessNotes = '## Business Changes\n\n';
-              for (const [module, modulePRs] of Object.entries(moduleGroups)) {
-                businessNotes += `### ${module}\n\n`;
-                modulePRs.forEach(pr => {
-                  businessNotes += `- ${pr.title}\n`;
-                  
-                  // Try to extract business/functional details
-                  if (pr.body) {
-                    const businessMatch = pr.body.match(/business changes?:|functional changes?:|changes?:([\s\S]*?)(?:##|$)/i);
-                    if (businessMatch && businessMatch[1] && businessMatch[1].trim()) {
-                      const details = businessMatch[1].trim().split('\n').map(line => `  ${line}`).join('\n');
-                      businessNotes += `${details}\n`;
-                    }
+              // Generate technical notes - organized by change type
+              let technicalNotes = '## Technical Details\n\n';
+              
+              // Group by change type
+              const typeGroups = {};
+              prs.forEach(pr => {
+                if (!typeGroups[pr.changeType]) {
+                  typeGroups[pr.changeType] = [];
+                }
+                typeGroups[pr.changeType].push(pr);
+              });
+              
+              for (const [type, typePRs] of Object.entries(typeGroups)) {
+                technicalNotes += `### ${type} Changes\n\n`;
+                
+                // Subgroup by module within each type
+                const typeModuleGroups = {};
+                typePRs.forEach(pr => {
+                  if (!typeModuleGroups[pr.module]) {
+                    typeModuleGroups[pr.module] = [];
                   }
+                  typeModuleGroups[pr.module].push(pr);
                 });
-                businessNotes += '\n';
+                
+                for (const [module, modulePRs] of Object.entries(typeModuleGroups)) {
+                  technicalNotes += `#### ${module}\n\n`;
+                  
+                  modulePRs.forEach(pr => {
+                    technicalNotes += `- [#${pr.number}](${pr.url}) - ${pr.title} (${pr.files_changed} files)\n`;
+                    
+                    if (pr.technicalDetails) {
+                      // Format the technical details as indented text
+                      const formattedDetails = pr.technicalDetails
+                        .split('\n')
+                        .map(line => `  ${line}`)
+                        .join('\n');
+                      
+                      technicalNotes += `${formattedDetails}\n\n`;
+                    }
+                  });
+                }
+                
+                technicalNotes += '\n';
               }
               
               // Summary statistics
               let summary = '## Release Summary\n\n';
-              summary += `- Total PRs: ${prs.length}\n`;
-              summary += `- Release Date: ${new Date().toISOString().split('T')[0]}\n`;
-              summary += `- Release Version: ${process.env.NEW_VERSION}\n\n`;
+              summary += `- **Release Version:** ${newVersion}\n`;
+              summary += `- **Release Date:** ${new Date().toISOString().split('T')[0]}\n`;
+              summary += `- **Total Changes:** ${prs.length} pull requests\n\n`;
               
               const changeTypes = {};
               prs.forEach(pr => {
                 changeTypes[pr.changeType] = (changeTypes[pr.changeType] || 0) + 1;
               });
               
-              summary += "### Changes by Type\n\n";
-              for (const [type, count] of Object.entries(changeTypes)) {
-                summary += `- ${type}: ${count}\n`;
+              if (Object.keys(changeTypes).length > 0) {
+                summary += "### Changes by Type\n\n";
+                for (const [type, count] of Object.entries(changeTypes)) {
+                  summary += `- **${type}:** ${count}\n`;
+                }
+                summary += '\n';
+              }
+              
+              // List modules touched
+              const modules = Object.keys(moduleGroups);
+              if (modules.length > 0) {
+                summary += "### Modules Changed\n\n";
+                modules.forEach(module => {
+                  summary += `- ${module} (${moduleGroups[module].length} changes)\n`;
+                });
+                summary += '\n';
               }
               
               // Assemble the full notes
-              const fullNotes = `# Release Notes - ${process.env.NEW_VERSION}\n\n${summary}\n${businessNotes}\n${technicalNotes}`;
+              const fullNotes = `# Release Notes - ${newVersion}\n\n${summary}\n${businessNotes}\n${technicalNotes}`;
               
               // Write to file
-              require('fs').writeFileSync('release_notes.md', fullNotes);
+              fs.writeFileSync('release_notes.md', fullNotes);
               console.log('Release notes generated successfully!');
               
-              // Output a shortened version for the release description
+              // Create a shortened version for the release description
               const shortNotes = `${summary}\n\nSee the attached release_notes.md for full details.`;
-              console.log(`::set-output name=short_notes::${shortNotes.replace(/\n/g, '%0A')}`);
+              
+              // Set output for GitHub Actions
+              const shortNotesEscaped = shortNotes.replace(/\n/g, '%0A');
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, `short_notes=${shortNotesEscaped}\n`);
               
             } catch (error) {
               console.error('Error generating release notes:', error);
@@ -239,10 +372,6 @@ jobs:
           EOF
 
           node analyze_changes.js
-          
-          # Save short notes to output
-          SHORT_NOTES=$(grep -v '::set-output' release_notes.md | head -20 | tr '\n' '%0A')
-          echo "SHORT_NOTES=$SHORT_NOTES" >> $GITHUB_OUTPUT
 
       - name: Create Tag and Release
         id: create_release
@@ -252,7 +381,7 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.NEW_VERSION }}
           release_name: Release v${{ steps.version.outputs.NEW_VERSION }}
-          body: ${{ steps.analyze.outputs.SHORT_NOTES }}
+          body: ${{ steps.analyze.outputs.short_notes }}
           draft: false
           prerelease: false
 
