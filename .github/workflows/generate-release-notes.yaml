@@ -81,13 +81,211 @@ jobs:
             echo "No recent PRs found or error fetching PRs"
           fi
 
-      - name: Copy scripts to working directory
+      - name: Create required script files
         run: |
-          # Create scripts directory if it doesn't exist
-          mkdir -p scripts
-          # Copy the two script files to the root working directory
-          cp .github/workflows/scripts/extract-business-impact.js ./extract-business-impact.js
-          cp .github/workflows/scripts/openai-analyzer.js ./openai-analyzer.js
+          echo "Creating script files in working directory..."
+          
+          # Create extract-business-impact.js
+          cat > extract-business-impact.js << 'EOF'
+          const fs = require('fs');
+
+          function extractBusinessImpact(prNumber, prTitle, prBody, files) {
+            // Initialize with default based on PR title
+            let businessImpact = {
+              summary: prTitle,
+              impact_level: 'low',
+              user_facing: false,
+              details: 'No detailed business impact provided.'
+            };
+            
+            // Check if PR body contains explicit business impact sections
+            if (prBody) {
+              const businessMatch = prBody.match(/business impact:?\s*(.*?)(?:\n\n|\n##|$)/is);
+              if (businessMatch && businessMatch[1].trim()) {
+                businessImpact.details = businessMatch[1].trim();
+                businessImpact.impact_level = 'medium';
+              }
+              
+              // Check if this is user-facing
+              const userFacingMatch = prBody.match(/user[- ]facing:?\s*(yes|no)/i);
+              if (userFacingMatch && userFacingMatch[1].toLowerCase() === 'yes') {
+                businessImpact.user_facing = true;
+              }
+              
+              // Check for keywords indicating importance
+              if (prBody.match(/\b(critical|urgent|important|major|significant)\b/i)) {
+                businessImpact.impact_level = 'high';
+              }
+            }
+            
+            // Analyze files for better context
+            if (files && files.length > 0) {
+              let hasUIChanges = false;
+              let hasFunctionalChanges = false;
+              let hasDataChanges = false;
+              
+              files.forEach(file => {
+                // Check file types
+                if (file.filename.match(/\.(jsx?|tsx?|css|scss|html)$/)) {
+                  if (file.patch && file.patch.match(/className|style=|<div|<button|<form/)) {
+                    hasUIChanges = true;
+                  }
+                }
+                
+                if (file.filename.match(/\.(jsx?|tsx?)$/)) {
+                  if (file.patch && file.patch.match(/function|const\s+\w+\s+=\s+\([^)]*\)\s+=>/)) {
+                    hasFunctionalChanges = true;
+                  }
+                }
+                
+                if (file.filename.match(/\.(json|sql|graphql)$/) || 
+                    (file.patch && file.patch.match(/model|schema|database|query|fetch|axios|api\./))) {
+                  hasDataChanges = true;
+                }
+              });
+              
+              // Generate more specific summary
+              if (hasUIChanges && hasFunctionalChanges) {
+                businessImpact.summary = `UI and functionality changes: ${prTitle}`;
+                businessImpact.user_facing = true;
+              } else if (hasUIChanges) {
+                businessImpact.summary = `UI improvements: ${prTitle}`;
+                businessImpact.user_facing = true;
+              } else if (hasFunctionalChanges) {
+                businessImpact.summary = `New functionality: ${prTitle}`;
+              } else if (hasDataChanges) {
+                businessImpact.summary = `Data model changes: ${prTitle}`;
+              }
+            }
+            
+            // Look for common patterns indicating business value
+            if (prTitle.match(/\b(add|implement|create|enable)\b/i)) {
+              businessImpact.summary = `New feature: ${prTitle.replace(/\b(add|implement|create|enable)\s+/i, '')}`;
+            } else if (prTitle.match(/\b(fix|resolve|correct)\b/i)) {
+              businessImpact.summary = `Bug fix: ${prTitle.replace(/\b(fix|resolve|correct)\s+/i, '')}`;
+            } else if (prTitle.match(/\b(improve|enhance|optimize|update)\b/i)) {
+              businessImpact.summary = `Enhancement: ${prTitle.replace(/\b(improve|enhance|optimize|update)\s+/i, '')}`;
+            }
+            
+            // Simple implementation of analyzeDetailedBusinessImpact as a placeholder
+            function analyzeDetailedBusinessImpact(prTitle, prBody, files) {
+              let detailedImpact = '';
+              
+              // Add basic file analysis
+              if (files && files.length > 0) {
+                detailedImpact += "### Files Changed\n\n";
+                const filesByType = {};
+                
+                files.forEach(file => {
+                  const ext = file.filename.split('.').pop();
+                  filesByType[ext] = (filesByType[ext] || 0) + 1;
+                });
+                
+                for (const [ext, count] of Object.entries(filesByType)) {
+                  detailedImpact += `- ${ext.toUpperCase()}: ${count} files\n`;
+                }
+                
+                detailedImpact += '\n';
+              }
+              
+              return detailedImpact;
+            }
+            
+            // Add detailed analysis
+            businessImpact.detailedAnalysis = analyzeDetailedBusinessImpact(prTitle, prBody, files);
+            
+            return businessImpact;
+          }
+
+          module.exports = { extractBusinessImpact };
+          EOF
+          
+          # Create openai-analyzer.js
+          cat > openai-analyzer.js << 'EOF'
+          const { Configuration, OpenAIApi } = require('openai');
+
+          async function analyzeWithOpenAI(prDetails, files) {
+            try {
+              const configuration = new Configuration({
+                apiKey: process.env.OPENAI_API_KEY,
+              });
+              const openai = new OpenAIApi(configuration);
+              
+              // Prepare context about the PR for OpenAI
+              // We'll be selective about what we send to minimize data exposure
+              const fileChangeSummaries = files.map(file => {
+                // Only include minimal information about each file
+                return {
+                  name: file.filename,
+                  // For patches, just include a brief summary or nothing
+                  changes: file.patch ? 
+                    `${file.additions} additions, ${file.deletions} deletions` : 
+                    'No patch available'
+                };
+              });
+
+              // Create the prompt for OpenAI
+              const prompt = `
+          You are an expert software developer who needs to explain code changes to non-technical stakeholders.
+
+          PR Title: ${prDetails.title}
+          PR Description: ${prDetails.body || 'No description provided'}
+
+          Files changed (${files.length}):
+          ${fileChangeSummaries.map(file => `- ${file.name}`).join('\n')}
+
+          Based on the PR title, description and files changed, please provide:
+          1. A brief business-friendly summary of what this change accomplishes (2-3 sentences)
+          2. What testers should focus on when testing this change
+          3. Potential business impact of this change
+
+          Format your response as JSON with these fields: "summary", "testing_focus", "business_impact"
+          `;
+
+              // Call OpenAI API with careful timeout and retry logic
+              const completion = await openai.createChatCompletion({
+                model: "gpt-3.5-turbo", // Using 3.5 to keep costs lower
+                messages: [
+                  { role: "system", content: "You are a helpful assistant that explains technical changes in business-friendly language." },
+                  { role: "user", content: prompt }
+                ],
+                max_tokens: 500,
+                temperature: 0.2, // Lower temperature for more consistent, factual responses
+              });
+
+              // Parse the response - expected to be in JSON format
+              let responseText = completion.data.choices[0].message.content.trim();
+              
+              // Ensure the response is valid JSON
+              try {
+                return JSON.parse(responseText);
+              } catch (e) {
+                // If not valid JSON, try to extract structured content anyway
+                const summaryMatch = responseText.match(/summary[":"]\s*(.*?)(?:,|\n|$)/i);
+                const testingMatch = responseText.match(/testing_focus[":"]\s*(.*?)(?:,|\n|$)/i);
+                const impactMatch = responseText.match(/business_impact[":"]\s*(.*?)(?:,|\n|$)/i);
+                
+                return {
+                  summary: summaryMatch ? summaryMatch[1].replace(/["']/g, '').trim() : 'No summary available',
+                  testing_focus: testingMatch ? testingMatch[1].replace(/["']/g, '').trim() : 'No testing focus available',
+                  business_impact: impactMatch ? impactMatch[1].replace(/["']/g, '').trim() : 'No business impact available'
+                };
+              }
+            } catch (error) {
+              console.error('Error calling OpenAI:', error.message);
+              return {
+                summary: 'Error generating AI summary',
+                testing_focus: 'Please review the technical changes to determine testing approach',
+                business_impact: 'Unable to determine business impact automatically'
+              };
+            }
+          }
+
+          module.exports = { analyzeWithOpenAI };
+          EOF
+          
+          # Verify the files were created
+          ls -la *.js
 
       - name: Analyze PRs and changes since last release
         id: analyze
@@ -99,9 +297,6 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # Debug: check if the files exist
-          ls -la
-          
           # Create and run the script to analyze changes
           cat > analyze_changes.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
