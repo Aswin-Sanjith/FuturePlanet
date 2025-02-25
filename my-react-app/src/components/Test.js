@@ -17,11 +17,6 @@ const Test = () => {
     </>
   );
 };
-      <input type="text" placeholder="Enter your name" />
-      <button>Click me</button>
-    </>
-  );
-};
 
 Test.propTypes = {};
 
