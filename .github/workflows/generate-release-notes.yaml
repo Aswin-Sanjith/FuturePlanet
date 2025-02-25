@@ -81,6 +81,14 @@ jobs:
             echo "No recent PRs found or error fetching PRs"
           fi
 
+      - name: Copy scripts to working directory
+        run: |
+          # Create scripts directory if it doesn't exist
+          mkdir -p scripts
+          # Copy the two script files to the root working directory
+          cp .github/workflows/scripts/extract-business-impact.js ./extract-business-impact.js
+          cp .github/workflows/scripts/openai-analyzer.js ./openai-analyzer.js
+
       - name: Analyze PRs and changes since last release
         id: analyze
         env:
@@ -91,6 +99,9 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          # Debug: check if the files exist
+          ls -la
+          
           # Create and run the script to analyze changes
           cat > analyze_changes.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
