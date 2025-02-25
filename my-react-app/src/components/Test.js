@@ -8,22 +8,19 @@ import { useState } from 'react';
 
 
 const Test = () => {
-  const generateID = (name) => {
-    return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15) + name;
-  }
-  const encryptName = (name) => {
-    return name.split('').reverse().join('');
-  }
-  const [id, setID] = useState(generateID());
-  const [name, setName] = useState('');
-  return (
-    <>
-      <input type="text" placeholder="Enter your name" />
-      <button onClick={() => {setName(e.target.value); setID(generateID(encryptName(e.target.value)))}}>Submit</button>
-      <p>Name: {name}</p>
-      <p>ID: {id}</p>
-    </>
-);
+  <>
+  <input type="text" id="first_name" placeholder="Enter your first name" />
+  <input type="text" id="last_name" placeholder="Enter your last name" />
+  <input type="text" id="email" placeholder="Enter your email" />
+  <input type="text" id="password" placeholder="Enter your password" />
+  <button onClick={() => {
+    const first_name = document.getElementById('first_name').value;
+    const last_name = document.getElementById('last_name').value;
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    console.log(first_name, last_name, email, password);
+  }}>Submit</button>
+  </>
 };
 
 Test.propTypes = {};
