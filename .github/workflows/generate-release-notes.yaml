@@ -1,4 +1,4 @@
-name: Generate Release Notes and Documentation
+name: Generate Release Notes for PR
 
 on:
   pull_request:
@@ -8,16 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'PR number to generate notes for'
+        description: 'PR number to generate release notes for'
         required: false
-      days_back:
-        description: 'Number of days to look back for changes'
-        required: false
-        default: '30'
 
 jobs:
   generate-release-notes:
-    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -44,34 +39,11 @@ jobs:
       - name: Set new version number
         id: version
         run: |
-          # Generate date-based version
+          # Generate date-based version or increment existing version
           CURRENT_DATE=$(date +'%Y.%m.%d')
-          
-          # Get the PR number - either from the event or from input
-          PR_NUMBER=""
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-            # Get branch name for additional identifier
-            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-            # Sanitize branch name for version
-            BRANCH_ID=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9]/-/g' | cut -c1-10)
-          elif [[ -n "${{ github.event.inputs.pr_number }}" ]]; then
-            PR_NUMBER="${{ github.event.inputs.pr_number }}"
-            BRANCH_ID="manual"
-          else
-            # Fallback for manual runs without PR number
-            BRANCH_ID="manual-$(date +%s)"
-          fi
-          
-          # Create unique version including PR number if available
-          if [[ -n "$PR_NUMBER" ]]; then
-            CURRENT_VERSION="${CURRENT_DATE}.pr${PR_NUMBER}-${BRANCH_ID}"
-          else
-            CURRENT_VERSION="${CURRENT_DATE}.${BRANCH_ID}"
-          fi
-          
+          # For multiple releases in same day, add build number
+          CURRENT_VERSION="${CURRENT_DATE}.1"
           echo "NEW_VERSION=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          echo "PR_NUMBER=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "New version will be: $CURRENT_VERSION"
 
       - name: Install dependencies
@@ -81,7 +53,7 @@ jobs:
           # Install OpenAI SDK
           npm install openai@3.2.1
 
-      - name: Generate PR Insights
+      - name: Generate AI Insights for PRs
         id: ai_insights
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,24 +61,24 @@ jobs:
           mkdir -p pr_insights
           echo "Fetching PR insights..."
           
-          # Determine which PR to analyze
-          PR_NUMBER=""
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-          elif [[ -n "${{ github.event.inputs.pr_number }}" ]]; then
-            PR_NUMBER="${{ github.event.inputs.pr_number }}"
-          else
-            # Get the most recent merged PR if not triggered by a specific PR
-            PR_NUMBER=$(gh pr list --state merged --limit 1 --json number | jq -r '.[0].number')
-          fi
+          # Get list of recent PRs
+          gh pr list --state merged --limit 100 --json number,mergedAt,title > recent_prs.json || echo "[]" > recent_prs.json
           
-          if [[ -n "$PR_NUMBER" ]]; then
-            echo "Processing PR #$PR_NUMBER"
-            # Get PR details
-            gh pr view $PR_NUMBER --json title,body,files,number,mergedAt,url,headRefName > pr_insights/$PR_NUMBER.json || echo "{}" > pr_insights/$PR_NUMBER.json
+          # For each PR, try to get details (not using Advanced Security features)
+          if [ -s recent_prs.json ] && [ "$(cat recent_prs.json)" != "[]" ]; then
+            jq -c '.[]' recent_prs.json | while read -r pr; do
+              pr_number=$(echo $pr | jq -r '.number')
+              merged_at=$(echo $pr | jq -r '.mergedAt')
+              
+              # Only process PRs merged in the last 30 days
+              if [[ -n "$merged_at" && "$merged_at" > "$(date -d '30 days ago' -I)" ]]; then
+                echo "Processing PR #$pr_number"
+                # Instead of AI summary, just get PR details that don't require Advanced Security
+                gh pr view $pr_number --json title,body,files > pr_insights/$pr_number.json || echo "{}" > pr_insights/$pr_number.json
+              fi
+            done
           else
-            echo "No PR to process"
-            exit 0
+            echo "No recent PRs found or error fetching PRs"
           fi
 
       - name: Create required script files
@@ -234,7 +206,6 @@ jobs:
 
           async function analyzeWithOpenAI(prDetails, files) {
             try {
-              console.log("Starting OpenAI analysis with API key:", process.env.OPENAI_API_KEY ? "Key exists" : "No key found");
               const configuration = new Configuration({
                 apiKey: process.env.OPENAI_API_KEY,
               });
@@ -302,11 +273,8 @@ jobs:
               }
             } catch (error) {
               console.error('Error calling OpenAI:', error.message);
-              if (error.response) {
-                console.error('API error details:', JSON.stringify(error.response.data));
-              }
               return {
-                summary: 'Error generating AI summary: ' + error.message,
+                summary: 'Error generating AI summary',
                 testing_focus: 'Please review the technical changes to determine testing approach',
                 business_impact: 'Unable to determine business impact automatically'
               };
@@ -319,15 +287,17 @@ jobs:
           # Verify the files were created
           ls -la *.js
 
-      - name: Analyze PRs and changes since last release
+      - name: Analyze PR and generate release notes
         id: analyze
         env:
           GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
-          LATEST_TAG: ${{ steps.latest_tag.outputs.LATEST_TAG }}
           NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
-          DAYS_BACK: ${{ github.event.inputs.days_back || '30' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PR_NUMBER: ${{ github.event.inputs.pr_number || github.event.pull_request.number || '' }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_ACTION: ${{ github.event.action }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
           # Create and run the script to analyze changes
           cat > analyze_changes.js << 'EOF'
@@ -373,21 +343,285 @@ jobs:
               
               // Process PR details
               const prs = [];
-              
-              // Only process the specific PR
-              const prFiles = fs.readdirSync('pr_insights');
-              if (prFiles.length === 0) {
-                console.log('No PRs to analyze.');
-                fs.writeFileSync('release_notes.md', '# Release Notes\n\nNo changes to report.');
-                process.exit(0);
+              for (const prNum of prNumbers) {
+                try {
+                  const { data: pr } = await octokit.pulls.get({
+                    owner,
+                    repo,
+                    pull_number: prNum
+                  });
+                  
+                  if (pr.merged_at && new Date(pr.merged_at) > new Date(new Date().getTime() - (daysBack * 24 * 60 * 60 * 1000))) {
+                    console.log(`Processing PR #${prNum}: ${pr.title}`);
+                    
+                    // Get PR changes
+                    const { data: files } = await octokit.pulls.listFiles({
+                      owner,
+                      repo,
+                      pull_number: prNum
+                    });
+                    
+                    // Categorize changes
+                    const fileTypes = {
+                      frontend: 0,
+                      backend: 0,
+                      config: 0,
+                      docs: 0,
+                      infrastructure: 0,
+                      test: 0
+                    };
+                    
+                    files.forEach(file => {
+                      const path = file.filename.toLowerCase();
+                      if (path.match(/\.(jsx?|tsx?|css|scss|html)$/)) fileTypes.frontend++;
+                      else if (path.match(/\.(cfm|cfc|php|py|java|go|rb)$/)) fileTypes.backend++;
+                      else if (path.match(/\.(json|yml|yaml|config|ini|env|toml)$/)) fileTypes.config++;
+                      else if (path.match(/\.(md|txt|pdf|docx)$/)) fileTypes.docs++;
+                      else if (path.match(/\.(test|spec)\.(jsx?|tsx?)$/)) fileTypes.test++;
+                      else if (path.match(/^(docker|k8s|terraform|ansible|\.github\/workflows)/)) fileTypes.infrastructure++;
+                    });
+                    
+                    // Determine primary change type
+                    let changeType = "Other";
+                    const maxChanges = Math.max(...Object.values(fileTypes));
+                    for (const [type, count] of Object.entries(fileTypes)) {
+                      if (count === maxChanges && count > 0) {
+                        changeType = type.charAt(0).toUpperCase() + type.slice(1);
+                        break;
+                      }
+                    }
+                    
+                    // Extract labels from PR to help categorize
+                    const labels = pr.labels.map(label => label.name);
+                    
+                    // Determine module from PR title, labels, or file paths
+                    let module = "General";
+                    
+                    // First try to get module from labels
+                    const moduleLabel = labels.find(label => label.startsWith('module:'));
+                    if (moduleLabel) {
+                      module = moduleLabel.replace('module:', '').trim();
+                    } 
+                    // Then try to get from PR title
+                    else if (pr.title.includes(':')) {
+                      const titleParts = pr.title.split(':');
+                      if (titleParts[0].length < 20) { // Reasonable module name length
+                        module = titleParts[0].trim();
+                      }
+                    }
+                    // Finally try to determine from files
+                    else {
+                      for (const file of files) {
+                        const pathParts = file.filename.split('/');
+                        // Check for components or modules directories
+                        if (pathParts.length > 2) {
+                          if (pathParts.includes('components') && pathParts.indexOf('components') + 1 < pathParts.length) {
+                            const componentIdx = pathParts.indexOf('components');
+                            module = pathParts[componentIdx + 1].replace(/([A-Z])/g, ' $1').trim();
+                            break;
+                          } else if (pathParts.includes('modules') && pathParts.indexOf('modules') + 1 < pathParts.length) {
+                            const moduleIdx = pathParts.indexOf('modules');
+                            module = pathParts[moduleIdx + 1].replace(/([A-Z])/g, ' $1').trim();
+                            break;
+                          } else if (pathParts.includes('features') && pathParts.indexOf('features') + 1 < pathParts.length) {
+                            const featureIdx = pathParts.indexOf('features');
+                            module = pathParts[featureIdx + 1].replace(/([A-Z])/g, ' $1').trim();
+                            break;
+                          }
+                        }
+                      }
+                    }
+                    
+                    // Make module name look nice (capitalize words)
+                    module = module.replace(/\b\w/g, l => l.toUpperCase());
+                    
+                    // Extract business and technical details from PR body
+                    let businessDetails = '';
+                    let technicalDetails = '';
+                    
+                    if (pr.body) {
+                      // First, check if PR follows a structured template with specific sections
+                      const businessSectionMatches = [
+                        /## business impact([\s\S]*?)(?:##|$)/i,
+                        /## business changes([\s\S]*?)(?:##|$)/i,
+                        /## user impact([\s\S]*?)(?:##|$)/i,
+                        /## functional changes([\s\S]*?)(?:##|$)/i
+                      ];
+                      
+                      for (const pattern of businessSectionMatches) {
+                        const match = pr.body.match(pattern);
+                        if (match && match[1] && match[1].trim()) {
+                          businessDetails = match[1].trim();
+                          break;
+                        }
+                      }
+                      
+                      // Enhanced code analysis section
+                      const techSectionMatches = [
+                        /## technical details([\s\S]*?)(?:##|$)/i,
+                        /## implementation([\s\S]*?)(?:##|$)/i,
+                        /## how it works([\s\S]*?)(?:##|$)/i,
+                        /## code changes([\s\S]*?)(?:##|$)/i
+                      ];
+                      
+                      for (const pattern of techSectionMatches) {
+                        const match = pr.body.match(pattern);
+                        if (match && match[1] && match[1].trim()) {
+                          technicalDetails = match[1].trim();
+                          break;
+                        }
+                      }
+                    }
+                    
+                    // Try additional extraction methods if structured data wasn't found
+                    if (!businessDetails && pr.body) {
+                      // Look for phrases that indicate business impact
+                      const impactPhrases = pr.body.match(/allows users to|enables|improves|fixes|enhances|adds ability to|users can now|customers can/i);
+                      if (impactPhrases) {
+                        // Extract the sentence containing the impact phrase
+                        const sentences = pr.body.split(/[.!?]+/);
+                        for (const sentence of sentences) {
+                          if (sentence.match(impactPhrases[0])) {
+                            businessDetails = sentence.trim();
+                            break;
+                          }
+                        }
+                      }
+                    }
+                    
+                    // Analyze actual file changes to extract business impact
+                    if (!businessDetails) {
+                      // Check the files to see if we can infer business impact from code changes
+                      let functionalityAdded = false;
+                      let uiChanged = false;
+                      let bugFixed = false;
+                      
+                      for (const file of files) {
+                        // Check for new React components or functions
+                        if (file.filename.match(/\.(jsx?|tsx?)$/) && 
+                            file.patch && 
+                            (file.patch.includes('function ') || 
+                             file.patch.includes('const ') || 
+                             file.patch.includes('export '))) {
+                          functionalityAdded = true;
+                        }
+                        
+                        // Check for UI changes
+                        if (file.filename.match(/\.(css|scss|jsx?|tsx?)$/) && 
+                            file.patch && 
+                            (file.patch.includes('className') || 
+                             file.patch.includes('style=') || 
+                             file.patch.includes('<div'))) {
+                          uiChanged = true;
+                        }
+                        
+                        // Check for bug fixes
+                        if (file.patch && 
+                            (file.patch.includes('fix') || 
+                             file.patch.includes('bug') || 
+                             file.patch.includes('issue'))) {
+                          bugFixed = true;
+                        }
+                      }
+                      
+                      // Generate a description based on code analysis
+                      if (functionalityAdded) {
+                        businessDetails = `Added new functionality in ${pr.title.toLowerCase()}`;
+                      } else if (uiChanged) {
+                        businessDetails = `Updated user interface for ${pr.title.toLowerCase()}`;
+                      } else if (bugFixed) {
+                        businessDetails = `Fixed issues related to ${pr.title.toLowerCase()}`;
+                      }
+                    }
+                    
+                    // Get AI-generated insights if available
+                    let aiGeneratedSummary = '';
+                    try {
+                      const aiInsightPath = `pr_insights/${pr.number}.json`;
+                      if (fs.existsSync(aiInsightPath)) {
+                        const aiData = JSON.parse(fs.readFileSync(aiInsightPath, 'utf8'));
+                        if (aiData && aiData.summary) {
+                          aiGeneratedSummary = aiData.summary;
+                        }
+                      }
+                    } catch (error) {
+                      console.log(`No AI insights available for PR #${pr.number}`);
+                    }
+                    
+                    // Use AI summary for business details if available
+                    if (aiGeneratedSummary && !businessDetails) {
+                      businessDetails = aiGeneratedSummary;
+                    }
+                    
+                    const businessImpact = extractBusinessImpact(
+                      pr.number,
+                      pr.title,
+                      pr.body, 
+                      files
+                    );
+                    
+                    let aiBusinessSummary = null;
+                    
+                    // Only call OpenAI if the API key is available
+                    if (process.env.OPENAI_API_KEY) {
+                      try {
+                        console.log(`Analyzing PR #${pr.number} with OpenAI...`);
+                        aiBusinessSummary = await analyzeWithOpenAI(
+                          { title: pr.title, body: pr.body },
+                          files
+                        );
+                        console.log(`OpenAI analysis complete for PR #${pr.number}`);
+                      } catch (error) {
+                        console.error(`Error analyzing PR #${pr.number} with OpenAI:`, error.message);
+                      }
+                    }
+                    
+                    // If OpenAI analysis was successful, use it to enhance the business details
+                    if (aiBusinessSummary) {
+                      businessDetails = `**Summary:** ${aiBusinessSummary.summary}\n\n`;
+                      
+                      // Add a section specifically for testers
+                      businessDetails += `**For Testers:** ${aiBusinessSummary.testing_focus}\n\n`;
+                      
+                      // Add the business impact section
+                      businessDetails += `**Business Impact:** ${aiBusinessSummary.business_impact}\n\n`;
+                      
+                      // Keep the detailed technical analysis for developers
+                      if (businessImpact.detailedAnalysis) {
+                        businessDetails += `**Technical Details:**\n\n${businessImpact.detailedAnalysis}\n`;
+                      }
+                    } else {
+                      // Fallback to our existing analysis method
+                      businessDetails = `**Impact:** ${businessImpact.summary}\n\n`;
+                      if (businessImpact.user_facing) {
+                        businessDetails += `**User-facing:** Yes\n\n`;
+                      }
+                      businessDetails += `**Details:** ${businessImpact.details}\n\n`;
+                    
+                      // Add the detailed analysis if available
+                      if (businessImpact.detailedAnalysis) {
+                        businessDetails += `**Detailed Analysis:**\n\n${businessImpact.detailedAnalysis}\n`;
+                      }
+                    }
+                    
+                    prs.push({
+                      number: pr.number,
+                      title: pr.title,
+                      author: pr.user.login,
+                      merged_at: pr.merged_at,
+                      changeType,
+                      module,
+                      url: pr.html_url,
+                      files_changed: files.length,
+                      labels,
+                      businessDetails,
+                      technicalDetails
+                    });
+                  }
+                } catch (error) {
+                  console.error(`Error processing PR #${prNum}:`, error.message);
+                }
               }
-              
-              // Just process the PR we collected
-              const prFile = prFiles[0];
-              const prNum = prFile.replace('.json', '');
-              console.log(`Processing PR #${prNum}`);
-              
-              // Continue with your existing processing logic for this single PR
               
               console.log(`Successfully processed ${prs.length} merged PRs`);
               
@@ -521,55 +755,54 @@ jobs:
 
       - name: Create Tag and Release
         id: create_release
-        continue-on-error: true  # Don't fail if release exists
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
-          tag_name: v${{ steps.version.outputs.NEW_VERSION }}
-          release_name: Release v${{ steps.version.outputs.NEW_VERSION }}
+          tag_name: v${{ steps.version.outputs.NEW_VERSION }}-pr${{ github.event.pull_request.number || github.event.inputs.pr_number || 'latest' }}
+          release_name: Release for PR #${{ github.event.pull_request.number || github.event.inputs.pr_number || 'latest' }}
           body: ${{ steps.analyze.outputs.short_notes }}
           draft: false
           prerelease: false
-
-      - name: Check Release Creation
-        if: steps.create_release.outcome == 'failure'
-        id: check_release
-        run: |
-          echo "Release creation failed. Creating a unique version."
-          # Generate an even more unique version with timestamp
-          TIMESTAMP=$(date +%s)
-          UNIQUE_VERSION="${{ steps.version.outputs.NEW_VERSION }}.ts${TIMESTAMP}"
-          echo "UNIQUE_VERSION=$UNIQUE_VERSION" >> $GITHUB_OUTPUT
-          
-          # Create release with the unique version
-          gh release create "v$UNIQUE_VERSION" \
-            --title "Release v$UNIQUE_VERSION" \
-            --notes "${{ steps.analyze.outputs.short_notes }}" \
-            --repo "${{ github.repository }}"
-          
-          # Pass the upload URL in a format compatible with upload-release-asset
-          API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/v$UNIQUE_VERSION"
-          UPLOAD_URL=$(curl -s -H "Authorization: token ${{ secrets.GIT_TOKEN }}" $API_URL | jq -r .upload_url)
-          echo "UPLOAD_URL=$UPLOAD_URL" >> $GITHUB_OUTPUT
 
       - name: Upload Release Notes
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
         with:
-          upload_url: ${{ steps.create_release.outcome == 'success' && steps.create_release.outputs.upload_url || steps.check_release.outputs.UPLOAD_URL }}
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./release_notes.md
           asset_name: release_notes.md
           asset_content_type: text/markdown
 
       - name: Archive documentation to repo
         run: |
-          mkdir -p docs/releases
-          VERSION_TO_USE="${{ steps.create_release.outcome == 'success' && steps.version.outputs.NEW_VERSION || steps.check_release.outputs.UNIQUE_VERSION }}"
-          cp release_notes.md docs/releases/v${VERSION_TO_USE}.md
+          # Get PR number and branch name for unique identifier
+          PR_NUMBER="${{ github.event.pull_request.number || github.event.inputs.pr_number || 'unknown' }}"
+          BRANCH_NAME="${{ github.event.pull_request.head.ref || 'main' }}"
+          
+          # Clean branch name for file naming
+          CLEAN_BRANCH_NAME=$(echo "$BRANCH_NAME" | tr '/' '-')
+          
+          # Create a unique filename
+          FILENAME="PR-${PR_NUMBER}-${CLEAN_BRANCH_NAME}"
+          RELEASE_DATE=$(date +'%Y-%m-%d')
+          
+          # Create directory structure
+          mkdir -p docs/releases/
+          
+          # Check if file already exists and create a unique name if needed
+          if [ -f "docs/releases/${FILENAME}.md" ]; then
+            TIMESTAMP=$(date +'%H%M%S')
+            FILENAME="${FILENAME}-${TIMESTAMP}"
+          fi
+          
+          # Copy generated notes to the unique filename
+          cp release_notes.md "docs/releases/${FILENAME}.md"
+          
+          # Commit and push
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
-          git add docs/releases/v${VERSION_TO_USE}.md
-          git commit -m "Add release notes for v${VERSION_TO_USE}" || echo "No changes to commit"
+          git add "docs/releases/${FILENAME}.md"
+          git commit -m "Add release notes for PR #${PR_NUMBER}" || echo "No changes to commit"
           git push
