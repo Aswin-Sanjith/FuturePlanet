@@ -50,6 +50,32 @@ jobs:
           # Install a specific version of octokit that supports CommonJS
           npm install @octokit/rest@18.12.0
 
+      - name: Generate AI Insights for PRs
+        id: ai_insights
+        run: |
+          # This leverages GitHub's built-in PR summaries when available
+          # Requires GitHub Advanced Security to be enabled
+          if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
+            mkdir -p pr_insights
+            echo "Fetching PR insights..."
+            
+            # Get list of recent PRs
+            gh pr list --state merged --limit 100 --json number,mergedAt,title > recent_prs.json
+            
+            # For each PR, try to get the GitHub-generated summary
+            jq -c '.[]' recent_prs.json | while read -r pr; do
+              pr_number=$(echo $pr | jq -r '.number')
+              merged_at=$(echo $pr | jq -r '.mergedAt')
+              
+              # Only process PRs merged in the last 30 days
+              if [[ -n "$merged_at" && "$merged_at" > "$(date -d '30 days ago' -I)" ]]; then
+                echo "Processing PR #$pr_number"
+                # Try to get GitHub's own summary (requires Advanced Security)
+                gh api repos/$GITHUB_REPOSITORY/pulls/$pr_number/ai/summary > pr_insights/$pr_number.json || echo "{}" > pr_insights/$pr_number.json
+              fi
+            done
+          fi
+
       - name: Analyze PRs and changes since last release
         id: analyze
         env:
@@ -63,6 +89,7 @@ jobs:
           cat > analyze_changes.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
           const fs = require('fs');
+          const { extractBusinessImpact } = require('./extract-business-impact');
           
           async function run() {
             try {
@@ -198,30 +225,135 @@ jobs:
                     let technicalDetails = '';
                     
                     if (pr.body) {
-                      // Look for business/functional details
-                      const businessMatch = pr.body.match(/business changes?:|functional changes?:|changes?:|user impact:|what changed?:([\s\S]*?)(?:##|technical|$)/i);
-                      if (businessMatch && businessMatch[1] && businessMatch[1].trim()) {
-                        businessDetails = businessMatch[1].trim();
+                      // First, check if PR follows a structured template with specific sections
+                      const businessSectionMatches = [
+                        /## business impact([\s\S]*?)(?:##|$)/i,
+                        /## business changes([\s\S]*?)(?:##|$)/i,
+                        /## user impact([\s\S]*?)(?:##|$)/i,
+                        /## functional changes([\s\S]*?)(?:##|$)/i
+                      ];
+                      
+                      for (const pattern of businessSectionMatches) {
+                        const match = pr.body.match(pattern);
+                        if (match && match[1] && match[1].trim()) {
+                          businessDetails = match[1].trim();
+                          break;
+                        }
                       }
                       
-                      // Look for technical details
-                      const techMatch = pr.body.match(/technical details?:|implementation details?:|how it works:([\s\S]*?)(?:##|$)/i);
-                      if (techMatch && techMatch[1] && techMatch[1].trim()) {
-                        technicalDetails = techMatch[1].trim();
+                      // Enhanced code analysis section
+                      const techSectionMatches = [
+                        /## technical details([\s\S]*?)(?:##|$)/i,
+                        /## implementation([\s\S]*?)(?:##|$)/i,
+                        /## how it works([\s\S]*?)(?:##|$)/i,
+                        /## code changes([\s\S]*?)(?:##|$)/i
+                      ];
+                      
+                      for (const pattern of techSectionMatches) {
+                        const match = pr.body.match(pattern);
+                        if (match && match[1] && match[1].trim()) {
+                          technicalDetails = match[1].trim();
+                          break;
+                        }
                       }
                     }
                     
-                    // If no explicit sections found, try to extract from title and first paragraph
+                    // Try additional extraction methods if structured data wasn't found
                     if (!businessDetails && pr.body) {
-                      const firstParagraph = pr.body.split('\n\n')[0].trim();
-                      if (firstParagraph && firstParagraph.length < 500) {
-                        businessDetails = firstParagraph;
+                      // Look for phrases that indicate business impact
+                      const impactPhrases = pr.body.match(/allows users to|enables|improves|fixes|enhances|adds ability to|users can now|customers can/i);
+                      if (impactPhrases) {
+                        // Extract the sentence containing the impact phrase
+                        const sentences = pr.body.split(/[.!?]+/);
+                        for (const sentence of sentences) {
+                          if (sentence.match(impactPhrases[0])) {
+                            businessDetails = sentence.trim();
+                            break;
+                          }
+                        }
                       }
                     }
                     
-                    // Fallback to title if no business details found
+                    // Analyze actual file changes to extract business impact
                     if (!businessDetails) {
-                      businessDetails = pr.title;
+                      // Check the files to see if we can infer business impact from code changes
+                      let functionalityAdded = false;
+                      let uiChanged = false;
+                      let bugFixed = false;
+                      
+                      for (const file of files) {
+                        // Check for new React components or functions
+                        if (file.filename.match(/\.(jsx?|tsx?)$/) && 
+                            file.patch && 
+                            (file.patch.includes('function ') || 
+                             file.patch.includes('const ') || 
+                             file.patch.includes('export '))) {
+                          functionalityAdded = true;
+                        }
+                        
+                        // Check for UI changes
+                        if (file.filename.match(/\.(css|scss|jsx?|tsx?)$/) && 
+                            file.patch && 
+                            (file.patch.includes('className') || 
+                             file.patch.includes('style=') || 
+                             file.patch.includes('<div'))) {
+                          uiChanged = true;
+                        }
+                        
+                        // Check for bug fixes
+                        if (file.patch && 
+                            (file.patch.includes('fix') || 
+                             file.patch.includes('bug') || 
+                             file.patch.includes('issue'))) {
+                          bugFixed = true;
+                        }
+                      }
+                      
+                      // Generate a description based on code analysis
+                      if (functionalityAdded) {
+                        businessDetails = `Added new functionality in ${pr.title.toLowerCase()}`;
+                      } else if (uiChanged) {
+                        businessDetails = `Updated user interface for ${pr.title.toLowerCase()}`;
+                      } else if (bugFixed) {
+                        businessDetails = `Fixed issues related to ${pr.title.toLowerCase()}`;
+                      }
+                    }
+                    
+                    // Get AI-generated insights if available
+                    let aiGeneratedSummary = '';
+                    try {
+                      const aiInsightPath = `pr_insights/${pr.number}.json`;
+                      if (fs.existsSync(aiInsightPath)) {
+                        const aiData = JSON.parse(fs.readFileSync(aiInsightPath, 'utf8'));
+                        if (aiData && aiData.summary) {
+                          aiGeneratedSummary = aiData.summary;
+                        }
+                      }
+                    } catch (error) {
+                      console.log(`No AI insights available for PR #${pr.number}`);
+                    }
+                    
+                    // Use AI summary for business details if available
+                    if (aiGeneratedSummary && !businessDetails) {
+                      businessDetails = aiGeneratedSummary;
+                    }
+                    
+                    const businessImpact = extractBusinessImpact(
+                      pr.number,
+                      pr.title,
+                      pr.body, 
+                      files
+                    );
+                    
+                    businessDetails = `**Impact:** ${businessImpact.summary}\n\n`;
+                    if (businessImpact.user_facing) {
+                      businessDetails += `**User-facing:** Yes\n\n`;
+                    }
+                    businessDetails += `**Details:** ${businessImpact.details}\n\n`;
+
+                    // Add the detailed analysis if available
+                    if (businessImpact.detailedAnalysis) {
+                      businessDetails += `**Detailed Analysis:**\n\n${businessImpact.detailedAnalysis}\n`;
                     }
                     
                     prs.push({
