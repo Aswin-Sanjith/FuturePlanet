@@ -14,6 +14,13 @@ const Test = () => {
     if (num === 0) return 1;
     return num * factorial(num - 1);
   }
+  const isPrime = (num) => {
+    if (num <= 1) return false;
+    for (let i = 2; i <= Math.sqrt(num); i++) {
+      if (num % i === 0) return false;
+    }
+    return true;
+  }
 
   return (
     <>
@@ -21,6 +28,7 @@ const Test = () => {
       <button onClick={() => setCount(count + 1)}>Increment</button>
       <button onClick={() => setCount(count - 1)}>Decrement</button>
       <p>Factorial: {factorial(count)}</p>
+      <p>Is Prime: {isPrime(count)}</p>
     </>
   );
 };
