@@ -17,6 +17,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    environment: release-notes
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -49,20 +50,22 @@ jobs:
         run: |
           # Install a specific version of octokit that supports CommonJS
           npm install @octokit/rest@18.12.0
+          # Install OpenAI SDK
+          npm install openai@3.2.1
 
       - name: Generate AI Insights for PRs
         id: ai_insights
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # This leverages GitHub's built-in PR summaries when available
-          # Requires GitHub Advanced Security to be enabled
-          if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
-            mkdir -p pr_insights
-            echo "Fetching PR insights..."
-            
-            # Get list of recent PRs
-            gh pr list --state merged --limit 100 --json number,mergedAt,title > recent_prs.json
-            
-            # For each PR, try to get the GitHub-generated summary
+          mkdir -p pr_insights
+          echo "Fetching PR insights..."
+          
+          # Get list of recent PRs
+          gh pr list --state merged --limit 100 --json number,mergedAt,title > recent_prs.json || echo "[]" > recent_prs.json
+          
+          # For each PR, try to get details (not using Advanced Security features)
+          if [ -s recent_prs.json ] && [ "$(cat recent_prs.json)" != "[]" ]; then
             jq -c '.[]' recent_prs.json | while read -r pr; do
               pr_number=$(echo $pr | jq -r '.number')
               merged_at=$(echo $pr | jq -r '.mergedAt')
@@ -70,10 +73,12 @@ jobs:
               # Only process PRs merged in the last 30 days
               if [[ -n "$merged_at" && "$merged_at" > "$(date -d '30 days ago' -I)" ]]; then
                 echo "Processing PR #$pr_number"
-                # Try to get GitHub's own summary (requires Advanced Security)
-                gh api repos/$GITHUB_REPOSITORY/pulls/$pr_number/ai/summary > pr_insights/$pr_number.json || echo "{}" > pr_insights/$pr_number.json
+                # Instead of AI summary, just get PR details that don't require Advanced Security
+                gh pr view $pr_number --json title,body,files > pr_insights/$pr_number.json || echo "{}" > pr_insights/$pr_number.json
               fi
             done
+          else
+            echo "No recent PRs found or error fetching PRs"
           fi
 
       - name: Analyze PRs and changes since last release
@@ -84,12 +89,14 @@ jobs:
           NEW_VERSION: ${{ steps.version.outputs.NEW_VERSION }}
           DAYS_BACK: ${{ github.event.inputs.days_back || '30' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           # Create and run the script to analyze changes
           cat > analyze_changes.js << 'EOF'
           const { Octokit } = require('@octokit/rest');
           const fs = require('fs');
           const { extractBusinessImpact } = require('./extract-business-impact');
+          const { analyzeWithOpenAI } = require('./openai-analyzer');
           
           async function run() {
             try {
@@ -345,15 +352,48 @@ jobs:
                       files
                     );
                     
-                    businessDetails = `**Impact:** ${businessImpact.summary}\n\n`;
-                    if (businessImpact.user_facing) {
-                      businessDetails += `**User-facing:** Yes\n\n`;
+                    let aiBusinessSummary = null;
+                    
+                    // Only call OpenAI if the API key is available
+                    if (process.env.OPENAI_API_KEY) {
+                      try {
+                        console.log(`Analyzing PR #${pr.number} with OpenAI...`);
+                        aiBusinessSummary = await analyzeWithOpenAI(
+                          { title: pr.title, body: pr.body },
+                          files
+                        );
+                        console.log(`OpenAI analysis complete for PR #${pr.number}`);
+                      } catch (error) {
+                        console.error(`Error analyzing PR #${pr.number} with OpenAI:`, error.message);
+                      }
                     }
-                    businessDetails += `**Details:** ${businessImpact.details}\n\n`;
-
-                    // Add the detailed analysis if available
-                    if (businessImpact.detailedAnalysis) {
-                      businessDetails += `**Detailed Analysis:**\n\n${businessImpact.detailedAnalysis}\n`;
+                    
+                    // If OpenAI analysis was successful, use it to enhance the business details
+                    if (aiBusinessSummary) {
+                      businessDetails = `**Summary:** ${aiBusinessSummary.summary}\n\n`;
+                      
+                      // Add a section specifically for testers
+                      businessDetails += `**For Testers:** ${aiBusinessSummary.testing_focus}\n\n`;
+                      
+                      // Add the business impact section
+                      businessDetails += `**Business Impact:** ${aiBusinessSummary.business_impact}\n\n`;
+                      
+                      // Keep the detailed technical analysis for developers
+                      if (businessImpact.detailedAnalysis) {
+                        businessDetails += `**Technical Details:**\n\n${businessImpact.detailedAnalysis}\n`;
+                      }
+                    } else {
+                      // Fallback to our existing analysis method
+                      businessDetails = `**Impact:** ${businessImpact.summary}\n\n`;
+                      if (businessImpact.user_facing) {
+                        businessDetails += `**User-facing:** Yes\n\n`;
+                      }
+                      businessDetails += `**Details:** ${businessImpact.details}\n\n`;
+                    
+                      // Add the detailed analysis if available
+                      if (businessImpact.detailedAnalysis) {
+                        businessDetails += `**Detailed Analysis:**\n\n${businessImpact.detailedAnalysis}\n`;
+                      }
                     }
                     
                     prs.push({
