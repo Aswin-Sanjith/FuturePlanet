@@ -3,23 +3,23 @@
  * @description A simple component that displays "Hello World"
  */
 import PropTypes from 'prop-types';
+import { useState } from 'react';
+
+
 
 const Test = () => {
+  const [count, setCount] = useState(0);
   return (
-    <div className="container mt-5">
-      <p> I want to test the release notes and the workflow, part 2, and the PR number</p>
-      <button onClick={() => {
-        console.log('Button clicked');
-      }}>Click me</button>
-      <p>I want to test the release notes and the workflow, part 2, and the PR number</p>
-      <button onClick={() => {
-        console.log('Button clicked');
-      }}>Click me</button>
-      <p>I want to test the release notes and the workflow, part 2, and the PR number</p>
-      <button onClick={() => {
-        console.log('Button clicked');
-      }}>Click me</button>
-    </div>
+    <>
+      <p>Count: {count}</p>
+      <button onClick={() => setCount(count + 1)}>Increment</button>
+      <button onClick={() => setCount(count - 1)}>Decrement</button>
+    </>
+  );
+};
+      <input type="text" placeholder="Enter your name" />
+      <button>Click me</button>
+    </>
   );
 };
 
